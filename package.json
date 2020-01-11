@@ -1,0 +1,13 @@
+{
+  "name": "reddit-parser",
+  "version": "0.1.0",
+  "description": "",
+  "main": "main.py",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Jorge Haddad",
+  "devDependencies": {
+    "serverless-google-cloudfunctions": "file:../../serverless-google-cloudfunctions"
+  }
+}

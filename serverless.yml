@@ -1,0 +1,36 @@
+service: reddit-parser
+
+provider:
+  name: google
+  stage: prod
+  region: us-central1
+  project: tribal-artifact-263821
+  credentials: /Users/jorge.haddad/.gcloud/tribal-artifact-263821-61b1fe367269.json
+
+plugins:
+  - serverless-google-cloudfunctions
+
+package:
+  exclude:
+    - node_modules/**
+    - venv/**
+    - package.json
+    - package-lock.json
+    - .serverless
+
+functions:
+  subreddit-new-scanner:
+    memorySize: 256
+    timeout: 120s
+    runtime: python37
+    handler: check_subreddit
+    serviceAccount: reddit-parser-function-agent@tribal-artifact-263821.iam.gserviceaccount.com
+    labels:
+      service: reddit-parser
+    environment:
+      SUBREDDITS: MagicArena
+      LOG_LEVEL: DEBUG
+    events:
+      - event:
+          eventType: providers/cloud.pubsub/eventTypes/topic.publish
+          resource: projects/tribal-artifact-263821/topics/scan_subreddit

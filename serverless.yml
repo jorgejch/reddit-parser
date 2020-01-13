@@ -16,7 +16,8 @@ package:
     - venv/**
     - package.json
     - package-lock.json
-    - .serverless
+    - .serverless/**
+    - .idea/**
 
 functions:
   subreddit-new-scanner:

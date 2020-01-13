@@ -2,4 +2,4 @@
 **/node_modules/
 **/venv/
 **/.idea/
-!/reddit_parser_vars.json
+reddit_parser_vars.json

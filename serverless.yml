@@ -23,14 +23,19 @@ functions:
     memorySize: 256
     timeout: 120s
     runtime: python37
-    handler: check_subreddit
+    handler: scan_subreddits_new
     serviceAccount: reddit-parser-function-agent@tribal-artifact-263821.iam.gserviceaccount.com
     labels:
       service: reddit-parser
-    environment:
-      SUBREDDITS: MagicArena
-      LOG_LEVEL: DEBUG
     events:
       - event:
           eventType: providers/cloud.pubsub/eventTypes/topic.publish
-          resource: projects/tribal-artifact-263821/topics/scan_subreddit
+          resource: projects/tribal-artifact-263821/topics/trigger_subreddits_scan
+    environment:
+      SUBREDDITS: MagicArena
+      LOG_LEVEL: INFO
+      VARS_BUCKET: web-parser-vars
+      TO_SMS_NUMBERS: '+18052845139,+18052940510'
+      FROM_SMS_NUMBER: '+18059792121'
+      SUBMISSION_TITLE_RE: '\bcodes?\b'
+      SUBMISSION_TEXT_RE: '\b\w{3}-\w{4}-\w{3}\b'

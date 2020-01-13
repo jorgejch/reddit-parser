@@ -36,6 +36,7 @@ functions:
       SUBREDDITS: MagicArena
       LOG_LEVEL: INFO
       VARS_BUCKET: web-parser-vars
+      VARS_BLOB: reddit_parser_vars.json
       TO_SMS_NUMBERS: '+18052845139,+18052940510'
       FROM_SMS_NUMBER: '+18059792121'
       SUBMISSION_TITLE_RE: '\bcodes?\b'

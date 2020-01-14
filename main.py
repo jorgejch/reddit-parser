@@ -215,13 +215,13 @@ def scan_subreddits_new(event, context):
     try:
         vars_dict = get_vars_dict(os.getenv('VARS_BUCKET'), os.getenv('VARS_BLOB'))
     except google_cloud_exceptions.NotFound as e:
-        logger.error("Failed to obtain vars dictionary due to: {}".format(e))
+        logger.error("Failed to obtain vars dictionary due to: {}".format(e), exc_info=True)
         return 1
 
     try:
         twilio_client = get_twilio_client(vars_dict['TWILIO_ACCOUNT_SID'], vars_dict['TWILIO_AUTH_TOKEN'])
     except TwilioException as e:
-        logger.error("Failed to obtain Twilio client due to: {}".format(e))
+        logger.error("Failed to obtain Twilio client due to: {}".format(e), exc_info=True)
         return 1
 
     try:
@@ -297,8 +297,8 @@ def scan_subreddits_new(event, context):
                         notify_sms(submission_rcrd, to_sms_numbers, from_sms_number, twilio_client, logger)
                         continue
 
-                if re.match(r'^.+\.(jpg|png|jpeg|bmp|tiff)$', submission['url']):
-                    excerpts_set = scan_image(submission['url'], submission_text_regex, vision, logger)
+                if re.match(r'^.+\.(jpg|png|jpeg|bmp|tiff)$', submission_rcrd['url']):
+                    excerpts_set = scan_image(submission_rcrd['url'], submission_text_regex, vision, logger)
                     if len(excerpts_set) > 0:
                         submission_rcrd['excerpts'] = excerpts_set
                         logger.info(
@@ -309,7 +309,7 @@ def scan_subreddits_new(event, context):
                         new_feed_text_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
                         notify_sms(submission_rcrd, to_sms_numbers, from_sms_number, twilio_client, logger)
         except Exception as e:
-            logger.warning("Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e))
+            logger.warning("Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e), exc_info=True)
             continue  # if scan failed first scanned submission shouldn't be stored.
 
         # Save first scanned document (most recent submission) to be used as pivot on next run.

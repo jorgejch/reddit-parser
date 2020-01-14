@@ -1,32 +1,34 @@
 import json
-import logging
 import os
 import re
+import logging
+import urllib.request
 from datetime import datetime
 from typing import Tuple, Generator
 
 import praw
 import prawcore
 import pytz
+import google.cloud.logging
 from google.cloud import firestore
 from google.cloud import storage
 from google.cloud.firestore_v1 import DocumentSnapshot
-from google.cloud.firestore_v1beta1 import DocumentReference, CollectionReference
+from google.cloud.firestore_v1 import DocumentReference, CollectionReference
 from google.cloud import exceptions as google_cloud_exceptions
+from google.cloud.logging.handlers import CloudLoggingHandler, setup_logging
+from google.cloud import vision
 from praw.exceptions import PRAWException
 from twilio.base.exceptions import TwilioException
 from twilio.rest import Client as TwilioClient
 from exceptions import RedditQueryPivotNotFound
 
 
-def get_logger(log_level: str) -> logging.Logger:
-    log_level = logging._nameToLevel[log_level] or logging.DEBUG
-    handler = logging.StreamHandler()
-    handler.setLevel(log_level)
-    logger = logging.getLogger('prawcore')
-    logger.setLevel(log_level)
-    logger.addHandler(handler)
-
+def get_logger(log_level: str):
+    client = google.cloud.logging.Client()
+    handler = CloudLoggingHandler(client)
+    setup_logging(handler, log_level=logging._nameToLevel[log_level])
+    logger = logging.getLogger()
+    logger.setLevel(logging._nameToLevel[log_level])
     return logger
 
 
@@ -45,28 +47,77 @@ def notify_sms(
 ):
     for to_num in to_phone_numbers:
         time = datetime.fromtimestamp(record['created_utc'], tz=pytz.timezone('US/Pacific'))
-        msg_text = "Title:{}\nCreated:{}\nLink:{}".format(record['title'], time, record['shortlink'])
+        msg_text = "Title:{}\nCreated:{}\nExcerpts:{}\nLink:{}".format(
+            record['title'], time, record['excerpts'], record['shortlink']
+        )
         message = client.messages.create(
             from_=from_phone_number,
             to=to_num,
             body=msg_text
         )
 
-        logger.info(
+        logger.debug(
             "Message sent at {} with notification sid {} and content: {}".format(
                 datetime.now(tz=pytz.timezone('US/Pacific')).timestamp(), message.sid, msg_text
             )
         )
 
 
-def scan_text(pattern: str, text: str) -> Tuple or False:
-    match = re.search(pattern, text, re.MULTILINE)
-    return match and match.group() or False
+def scan_text(pattern: str, text: str) -> set:
+    matches = re.findall(pattern, text, re.MULTILINE | re.UNICODE)
+    return set(matches)
 
 
 def scan_title(pattern: str, title: str) -> bool:
     match = re.search(pattern, title, re.I)
     return match is not None
+
+
+def scan_image(url: str, pattern: str, vis: vision, logger: logging.Logger) -> set:
+    """
+    >>> import main
+    >>> from google.cloud import vision
+    >>> import mock
+    >>> logger = mock.Mock()
+    >>> url = 'https://i.redd.it/775kfxtiyma41.jpg'
+    >>> pattern = '\w{3}-\w{4}-\w{3}'
+    >>> main.scan_image(url, pattern, vision, logger) ^ {
+    ...                                          'XB8-Cytr-YWR',
+    ...                                          'YQq-St4b-qzu',
+    ...                                          'WOQ-bHUK-Uye',
+    ...                                          'QIR-XWc7-Xwu',
+    ...                                          '5KO-ASGZ-ypm',
+    ...                                          'FuD-Xc7A-v5t',
+    ...                                          'PZX-LUty-h4v'
+    ...                                          }
+    set()
+
+    :param url: Url to the image to be parsed.
+    :param pattern: Regex pattern to extract from parsed image's text.
+    :param vis: google.cloud.vision module.
+    :param logger: Logger.
+    :return: set with text excerpts obtained from the image.
+    """
+    image = vis.types.Image()
+    image.source.image_uri = url
+    client = vis.ImageAnnotatorClient()
+    response_doc_text = client.document_text_detection(image=image)
+    response_text = client.text_detection(image=image)
+    text_doc_annotations = response_doc_text.text_annotations
+    text_annotations = response_text.text_annotations
+    text_doc_list = [text_annotation.description for text_annotation in text_doc_annotations]
+    text_list = [text_annotation.description for text_annotation in text_annotations]
+    text_doc_excerpts = set(re.findall(r'{}'.format(pattern), ' '.join(text_doc_list), re.MULTILINE | re.UNICODE))
+    text_excerpts = set(re.findall(r'{}'.format(pattern), ' '.join(text_list), re.MULTILINE | re.UNICODE))
+
+    logger.debug(
+        "Number of excerpts in set obtained with the document text detection feature: {}.".format(text_doc_excerpts)
+    )
+    logger.debug(
+        "Number of excerpts in set obtained with the text detection feature: {}.".format(text_excerpts)
+    )
+
+    return len(text_doc_excerpts) >= len(text_excerpts) and text_doc_excerpts or text_excerpts
 
 
 def get_reddit_query_pivot(stream, reddit_client, logger):
@@ -80,7 +131,10 @@ def get_reddit_query_pivot(stream, reddit_client, logger):
         # Check if submission still exists. Continue to the next if not.
         try:
             logger.debug("Testing if submission {} still exists.".format(doc_dict['id']))
-            sb._fetch_data()
+            sb_selftext = sb.selftext
+            sb_author = sb.author
+            if sb_selftext == '[deleted]' or sb_selftext == '[removed]' or sb_author is None:
+                continue
             return get_submission_record(sb)
         except prawcore.exceptions.NotFound:
             continue
@@ -155,10 +209,8 @@ def scan_subreddits_new(event, context):
     to_sms_numbers = os.getenv('TO_SMS_NUMBERS').split(',')
     from_sms_number = os.getenv('FROM_SMS_NUMBER')
     subreddits_names = os.getenv('SUBREDDITS').split(',')
-    submission_title_regex = os.getenv('SUBMISSION_TITLE_RE')
-    logger.debug("Testing titles for pattern {}.".format(submission_title_regex))
     submission_text_regex = os.getenv('SUBMISSION_TEXT_RE')
-    logger.debug("Testing text for pattern {}.".format(submission_text_regex))
+    logger.debug("Testing text and images for pattern {}.".format(submission_text_regex))
 
     try:
         vars_dict = get_vars_dict(os.getenv('VARS_BUCKET'), os.getenv('VARS_BLOB'))
@@ -200,9 +252,6 @@ def scan_subreddits_new(event, context):
         new_feed_first_scanned_doc_stream: Generator[DocumentSnapshot] = new_feed_first_scanned_col_ref \
             .order_by(u'id', direction=firestore.Query.DESCENDING) \
             .stream()
-        new_feed_title_pattern_matched_col_ref: CollectionReference = subreddit_new_feed_doc_ref.collection(
-            u'title_pattern_matched'
-        )
         new_feed_text_pattern_matched_col_ref: CollectionReference = subreddit_new_feed_doc_ref.collection(
             u'text_pattern_matched'
         )
@@ -211,7 +260,7 @@ def scan_subreddits_new(event, context):
             # Most recent submission on subreddit's new feed on last run.
             prev_run_first_scanned_rcrd = get_reddit_query_pivot(new_feed_first_scanned_doc_stream, reddit, logger)
             logger.info(
-                "Title of last run's most recent submission in subreddit {}: {}".format(
+                "Title of last run's most recent submission in subreddit {} is '{}'".format(
                     sr_name, prev_run_first_scanned_rcrd['title']
                 )
             )
@@ -235,19 +284,33 @@ def scan_subreddits_new(event, context):
                 if first_scanned_rcrd is None:
                     first_scanned_rcrd = submission_rcrd
 
-                if scan_title(submission_title_regex, submission_rcrd['title']):
-                    logger.info("Found match in title of submission with id {}.".format(submission_rcrd['id']))
-                    new_feed_title_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
-                    notify_sms(submission_rcrd, to_sms_numbers, from_sms_number, twilio_client, logger)
-                    continue
-
                 if len(submission_rcrd['text']) > 0:
-                    if scan_text(submission_text_regex, submission_rcrd['text']):
-                        logger.info('Found match in text of submission with id {}.'.format(submission_rcrd['id']))
+                    excerpts_set = scan_text(submission_text_regex, submission_rcrd['text'])
+                    if len(excerpts_set) > 0:
+                        submission_rcrd['excerpts'] = excerpts_set
+                        logger.info(
+                            'Found match in text of submission with id {}. Excerpts: {}.'.format(
+                                submission_rcrd['id'], excerpts_set
+                            )
+                        )
+                        new_feed_text_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
+                        notify_sms(submission_rcrd, to_sms_numbers, from_sms_number, twilio_client, logger)
+                        continue
+
+                if re.match(r'^.+\.(jpg|png|jpeg|bmp|tiff)$', submission['url']):
+                    excerpts_set = scan_image(submission['url'], submission_text_regex, vision, logger)
+                    if len(excerpts_set) > 0:
+                        submission_rcrd['excerpts'] = excerpts_set
+                        logger.info(
+                            'Found match in image of submission with id {}. Excerpts: {}.'.format(
+                                submission_rcrd['id'], excerpts_set
+                            )
+                        )
                         new_feed_text_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
                         notify_sms(submission_rcrd, to_sms_numbers, from_sms_number, twilio_client, logger)
         except Exception as e:
             logger.warning("Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e))
+            continue  # if scan failed first scanned submission shouldn't be stored.
 
         # Save first scanned document (most recent submission) to be used as pivot on next run.
         if first_scanned_rcrd is not None:

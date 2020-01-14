@@ -1,7 +1,9 @@
 prawcore
 pytz
 praw
+google-cloud-logging
 google-cloud-firestore
 google-cloud-storage
+google-cloud-vision
 twilio
 firebase-admin

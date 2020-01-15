@@ -268,8 +268,9 @@ def scan_subreddits_new(event, context):
             )
             new_feed_first_scanned_doc_stream: Generator[DocumentSnapshot, None, None] = \
                 new_feed_first_scanned_col_ref \
-                    .order_by(u'id', direction=firestore.Query.DESCENDING) \
-                    .stream()
+                .order_by(u'id', direction=firestore.Query.DESCENDING) \
+                .limit(3) \
+                .stream()
             new_feed_text_pattern_matched_col_ref: CollectionReference = subreddit_new_feed_doc_ref.collection(
                 u'text_pattern_matched'
             )

@@ -1,66 +1,39 @@
 import json
+import logging
 import os
 import re
-import logging
 from datetime import datetime
 from typing import Generator
 
 import praw
 import prawcore
 import pytz
-import google.cloud.logging
-from google.cloud import firestore
-from google.cloud import storage
-from google.cloud.firestore_v1 import DocumentSnapshot
-from google.cloud.firestore_v1 import DocumentReference, CollectionReference
-from google.cloud import exceptions as google_cloud_exceptions
-from google.cloud.logging.handlers import CloudLoggingHandler, setup_logging
 from google.cloud import error_reporting
+from google.cloud import exceptions as google_cloud_exceptions
+from google.cloud import firestore, pubsub_v1 as pubsub
+from google.cloud import storage
 from google.cloud import vision
+from google.cloud.firestore_v1 import DocumentReference, CollectionReference
+from google.cloud.firestore_v1 import DocumentSnapshot
+from google.cloud.logging import Client as LoggingClient
 from praw.exceptions import PRAWException
-from twilio.base.exceptions import TwilioException
-from twilio.rest import Client as TwilioClient
+
 from exceptions import RedditQueryPivotNotFound
 
 
 def get_logger(log_level: str):
-    client = google.cloud.logging.Client()
-    handler = CloudLoggingHandler(client)
-    setup_logging(handler, log_level=logging._nameToLevel[log_level])
-    logger = logging.getLogger()
+    client = LoggingClient()
+    handler = client.get_default_handler()
+    formatter = logging.Formatter('[{levelname:<s}]-[{name:>s}]: {message}', None, '{')
+    handler.setFormatter(formatter)
+    handler.setLevel(logging._nameToLevel[log_level])
+    logger = logging.getLogger('cloudLogger')
+    logger.addHandler(handler)
     logger.setLevel(logging._nameToLevel[log_level])
+    praw_logger = logging.getLogger('prawcore')
+    praw_logger.setLevel(logging._nameToLevel[log_level])
+    praw_logger.addHandler(handler)
     return logger
-
-
-def get_twilio_client(acct_sid: str, auth_token: str) -> TwilioClient:
-    twilio_account_sid = acct_sid
-    twilio_auth_token = auth_token
-    return TwilioClient(twilio_account_sid, twilio_auth_token)
-
-
-def notify_sms(
-        record: dict,
-        to_phone_numbers: list,
-        from_phone_number: str,
-        client: TwilioClient,
-        logger: logging.Logger
-):
-    for to_num in to_phone_numbers:
-        time = datetime.fromtimestamp(record['created_utc'], tz=pytz.timezone('US/Pacific'))
-        msg_text = "Title: {}\nCreated: {}\nExcerpts: {}\nLink: {}".format(
-            record['title'], time, record['excerpts'], record['shortlink']
-        )
-        message = client.messages.create(
-            from_=from_phone_number,
-            to=to_num,
-            body=msg_text
-        )
-
-        logger.debug(
-            "Message sent at {} with notification sid {} and content: {}".format(
-                datetime.now(tz=pytz.timezone('US/Pacific')).timestamp(), message.sid, msg_text
-            )
-        )
 
 
 def scan_text(pattern: str, text: str) -> set:
@@ -73,7 +46,7 @@ def scan_title(pattern: str, title: str) -> bool:
     return match is not None
 
 
-def scan_image(url: str, pattern: str, vis: vision, logger: logging.Logger) -> set:
+def scan_image(url: str, raw_pattern: str, vis: vision, logger: logging.Logger) -> set:
     """
     >>> import main
     >>> from google.cloud import vision
@@ -93,12 +66,13 @@ def scan_image(url: str, pattern: str, vis: vision, logger: logging.Logger) -> s
     set()
 
     :param url: Url to the image to be parsed.
-    :param pattern: Regex pattern to extract from parsed image's text.
+    :param raw_pattern: Regex pattern to extract from parsed image's text.
     :param vis: google.cloud.vision module.
     :param logger: Logger.
     :return: set with text excerpts obtained from the image.
     """
     logging.debug("Beginning image scan for image with url '{}'.")
+    pattern = raw_pattern.rstrip('\b').lstrip('\b')
     image = vis.types.Image()
     image.source.image_uri = url
     client = vis.ImageAnnotatorClient()
@@ -111,12 +85,17 @@ def scan_image(url: str, pattern: str, vis: vision, logger: logging.Logger) -> s
     text_doc_excerpts = set(re.findall(r'{}'.format(pattern), ' '.join(text_doc_list), re.MULTILINE | re.UNICODE))
     text_excerpts = set(re.findall(r'{}'.format(pattern), ' '.join(text_list), re.MULTILINE | re.UNICODE))
 
-    logger.debug(
-        "Number of excerpts in set obtained with the document text detection feature: {}.".format(text_doc_excerpts)
-    )
-    logger.debug(
-        "Number of excerpts in set obtained with the text detection feature: {}.".format(text_excerpts)
-    )
+    if len(text_doc_excerpts) > 0:
+        logger.info(
+            "Number of excerpts in set obtained with the document text detection feature: {}."
+                .format(len(text_doc_excerpts))
+        )
+
+    if len(text_excerpts) > 0:
+        logger.info(
+            "Number of excerpts in set obtained with the regular text detection feature: {}."
+                .format(len(text_excerpts))
+        )
 
     return len(text_doc_excerpts) >= len(text_excerpts) and text_doc_excerpts or text_excerpts
 
@@ -127,21 +106,25 @@ def get_reddit_query_pivot(
         logger: logging.Logger
 ) -> dict:
     """
-    Find current run pivot, an existing previous run's most recent submission scanned on a subreddit's new feed.
+    Find current run's pivot, an existing previous run's most recent submission scanned on a subreddit's new feed.
     """
     for doc in stream:
         doc_dict = doc.to_dict()
         sb = reddit_client.submission(doc_dict['id'])
 
-        # Check if submission still exists. Continue to the next if not.
+        # Check if submission is still in feed. Continue to the next if not.
         try:
-            logger.debug("Testing if submission {} still exists.".format(doc_dict['id']))
+            logger.debug("Testing if submission {} is still in feed.".format(doc_dict['id']))
             sb_selftext = sb.selftext
-            sb_author = sb.author
-            if sb_selftext == '[deleted]' or sb_selftext == '[removed]' or sb_author is None:
+            if sb_selftext == '[deleted]' \
+                    or sb_selftext == '[removed]' \
+                    or sb.author is None \
+                    or sb.removed_by_category is not None:
+                logger.info("Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
                 continue
             return get_submission_record(sb)
         except prawcore.exceptions.NotFound:
+            logger.info("Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
             continue
 
     raise RedditQueryPivotNotFound('Reddit submissions query pivot not found.')
@@ -178,6 +161,53 @@ def get_vars_dict(bucket_name: str, blob_name: str) -> dict:
     return json.loads(blob.download_as_string())
 
 
+def notify_sms(
+        record: dict,
+        to_numbers: [],
+        pub_sub_client: pubsub.PublisherClient,
+        pub_sub_topic_name: str
+):
+    """
+    Trigger sms notification function with sms payload.
+
+    >>> import main
+    >>> from google.cloud import pubsub_v1 as pubsub
+    >>> rcrd = {
+    ...     u'id': 1,
+    ...     u'name': 'Test',
+    ...     u'fullname': 't3_Test',
+    ...     u'title': 'Test of sms notification.',
+    ...     u'created_utc': 1579338187,
+    ...     u'permalink': 'reddit/r/something',
+    ...     u'url': 'http://something.com',
+    ...     u'shortlink': 'http://shortlink.com',
+    ...     u'text': 'xxx-xxxx-xxx',
+    ...     u'excerpts': 'xxx-xxxx-xxx'
+    ... }
+    >>> ps_client = pubsub.PublisherClient()
+    >>> ps_publish_topic = 'projects/tribal-artifact-263821/topics/send_notification'
+    >>> main.notify_sms(rcrd, ['+18052845139'], ps_client, ps_publish_topic)
+    0
+
+    :param record:
+    :param to_numbers:
+    :param pub_sub_client:
+    :param pub_sub_topic_name:
+    :return:
+    """
+    time = datetime.fromtimestamp(record['created_utc'], tz=pytz.timezone('US/Pacific'))
+    msg_text = "Title: {}\nCreated: {}\nExcerpts: {}\nLink: {}".format(
+        record['title'], time, record['excerpts'], record['shortlink'])
+    data = json.dumps({
+        'sms': {
+            'message': msg_text,
+            'to_numbers': to_numbers
+        }
+    })
+    pub_sub_client.publish(pub_sub_topic_name, bytes(data, 'utf-8'))
+    return 0
+
+
 def scan_subreddits_new(event, context):
     """
     Checks a subreddit for patterns in the title and text of a set of subreddits submission .
@@ -197,9 +227,7 @@ def scan_subreddits_new(event, context):
     ...                 "REDDIT_PASSWORD": os.getenv('REDDIT_PASSWORD'),
     ...                 "REDDIT_USERAGENT": os.getenv('REDDIT_USERAGENT'),
     ...                 "REDDIT_USERNAME": os.getenv('REDDIT_USERNAME'),
-    ...                 "TWILIO_ACCOUNT_SID": os.getenv('TWILIO_ACCOUNT_SID'),
-    ...                 "TWILIO_AUTH_TOKEN": os.getenv('TWILIO_AUTH_TOKEN'),
-    ...                 "TWILIO_NOTIFY_SID": os.getenv('TWILIO_NOTIFY_SID'),
+    ...                 "NOTIFY_PUBSUB_TOPIC": os.getenv('NOTIFY_PUBSUB_TOPIC')
     ...            }
     >>> main.get_vars_dict = get_vars_dict
     >>> main.scan_subreddits_new(data, mock_context)
@@ -216,26 +244,18 @@ def scan_subreddits_new(event, context):
 
     try:
         to_sms_numbers = os.getenv('TO_SMS_NUMBERS').split(',')
-        from_sms_number = os.getenv('FROM_SMS_NUMBER')
         subreddits_names = os.getenv('SUBREDDITS').split(',')
         submission_text_regex = os.getenv('SUBMISSION_TEXT_RE')
         logger.debug("Testing text and images for pattern {}.".format(submission_text_regex))
     except Exception as e:
-        logger.error("Failed to get environment variable(s) due to: {}".format(e))
+        logger.error("Failed to get environment variable(s) due to: {}.".format(e))
         error_reporting_client.report_exception()
         return 1
 
     try:
         vars_dict = get_vars_dict(os.getenv('VARS_BUCKET'), os.getenv('VARS_BLOB'))
     except google_cloud_exceptions.NotFound as e:
-        logger.error("Failed to obtain vars dictionary due to: {}".format(e))
-        error_reporting_client.report_exception()
-        return 1
-
-    try:
-        twilio_client = get_twilio_client(vars_dict['TWILIO_ACCOUNT_SID'], vars_dict['TWILIO_AUTH_TOKEN'])
-    except TwilioException as e:
-        logger.error("Failed to obtain Twilio client due to: {}".format(e))
+        logger.error("Failed to obtain vars dictionary due to: {}.".format(e))
         error_reporting_client.report_exception()
         return 1
 
@@ -249,10 +269,17 @@ def scan_subreddits_new(event, context):
         )
         subreddits = [reddit.subreddit(sr_name) for sr_name in subreddits_names]
     except PRAWException as e:
-        logger.error("Failed to obtain Reddit PRAW client due to: {}".format(e))
+        logger.error("Failed to obtain Reddit PRAW client due to: {}.".format(e))
         error_reporting_client.report_exception()
         return 1
 
+    try:
+        pub_sub_topic_name = vars_dict['NOTIFY_PUBSUB_TOPIC']
+    except KeyError as e:
+        logging.error('Unable to get notify pub/sub topic, due to: {}.'.format(e))
+        return 1
+
+    pub_sub_client = pubsub.PublisherClient()
     db = firestore.Client()
 
     # Scan stream 'new' of configured subreddits.
@@ -268,9 +295,9 @@ def scan_subreddits_new(event, context):
             )
             new_feed_first_scanned_doc_stream: Generator[DocumentSnapshot, None, None] = \
                 new_feed_first_scanned_col_ref \
-                .order_by(u'id', direction=firestore.Query.DESCENDING) \
-                .limit(3) \
-                .stream()
+                    .order_by(u'id', direction=firestore.Query.DESCENDING) \
+                    .limit(3) \
+                    .stream()
             new_feed_text_pattern_matched_col_ref: CollectionReference = subreddit_new_feed_doc_ref.collection(
                 u'text_pattern_matched'
             )
@@ -291,7 +318,10 @@ def scan_subreddits_new(event, context):
                 )
             )
         except RedditQueryPivotNotFound:
-            logger.warning('No submission found from previous runs to pivot the reddit query. Fetching the limit.')
+            logger.warning(
+                'No submission found from previous runs to pivot the reddit query for subreddit {}. Fetching the limit.'
+                    .format(sr_name)
+            )
             prev_run_first_scanned_rcrd = None
 
         prev_run_first_scanned_rcrd_fullname = prev_run_first_scanned_rcrd \
@@ -315,12 +345,12 @@ def scan_subreddits_new(event, context):
                     if len(excerpts_set) > 0:
                         submission_rcrd['excerpts'] = '\n'.join(excerpts_set)
                         logger.info(
-                            'Found match in text of submission with id {}. Excerpts: {}.'.format(
-                                submission_rcrd['id'], excerpts_set
+                            'Found match in text of submission with id {} for subreddit {}. Excerpts: {}.'.format(
+                                submission_rcrd['id'], sr_name, excerpts_set
                             )
                         )
                         new_feed_text_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
-                        notify_sms(submission_rcrd, to_sms_numbers, from_sms_number, twilio_client, logger)
+                        notify_sms(submission_rcrd, to_sms_numbers, pub_sub_client, pub_sub_topic_name)
                         continue
 
                 if re.match(r'^.+\.(jpg|png|jpeg|bmp|tiff)$', submission_rcrd['url']):
@@ -328,12 +358,12 @@ def scan_subreddits_new(event, context):
                     if len(excerpts_set) > 0:
                         submission_rcrd['excerpts'] = '\n'.join(excerpts_set)
                         logger.info(
-                            'Found match in image of submission with id {}. Excerpts: {}.'.format(
-                                submission_rcrd['id'], excerpts_set
+                            'Found match in image of submission with id {} in subreddit {}. Excerpts: {}.'.format(
+                                submission_rcrd['id'], sr_name, excerpts_set
                             )
                         )
                         new_feed_image_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
-                        notify_sms(submission_rcrd, to_sms_numbers, from_sms_number, twilio_client, logger)
+                        notify_sms(submission_rcrd, to_sms_numbers, pub_sub_client, pub_sub_topic_name)
         except Exception as e:
             logger.warning("Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e))
             error_reporting_client.report_exception()
@@ -341,8 +371,8 @@ def scan_subreddits_new(event, context):
 
         # Save first scanned document (most recent submission) to be used as pivot on next run.
         if first_scanned_rcrd is not None:
-            logger.info("Setting submission with title '{}' to collection {}.".format(
-                first_scanned_rcrd['title'], new_feed_first_scanned_col_ref.id
+            logger.info("Setting submission with title '{}' to collection {} for subreddit {}.".format(
+                first_scanned_rcrd['title'], new_feed_first_scanned_col_ref.id, sr_name
             ))
             new_feed_first_scanned_col_ref.document(first_scanned_rcrd['id']).set(first_scanned_rcrd)
         else:

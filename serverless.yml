@@ -33,10 +33,10 @@ functions:
           eventType: providers/cloud.pubsub/eventTypes/topic.publish
           resource: projects/tribal-artifact-263821/topics/trigger_subreddits_scan
     environment:
-      SUBREDDITS: MagicArena
-      LOG_LEVEL: INFO
+      SUBREDDITS: MagicArena,magicTCG
+      LOG_LEVEL: DEBUG
       VARS_BUCKET: web-parser-vars
       VARS_BLOB: reddit_parser_vars.json
       TO_SMS_NUMBERS: '+18052845139,+18052940510'
-      FROM_SMS_NUMBER: '+18059792121'
-      SUBMISSION_TEXT_RE: '\w{3}-\w{4}-\w{3}'
+      SUBMISSION_TEXT_RE: '\b\w{3}-\w{4}-\w{3}\b'
+

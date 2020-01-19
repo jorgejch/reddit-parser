@@ -20,8 +20,14 @@ from praw.exceptions import PRAWException
 
 from exceptions import RedditQueryPivotNotFound
 
+_logger = None
+_vars_dict = None
+
 
 def get_logger(log_level: str):
+    global _logger
+    if _logger is not None:
+        return _logger
     client = LoggingClient()
     handler = client.get_default_handler()
     formatter = logging.Formatter('[{levelname:<s}]-[{name:>s}]: {message}', None, '{')
@@ -33,7 +39,8 @@ def get_logger(log_level: str):
     praw_logger = logging.getLogger('prawcore')
     praw_logger.setLevel(logging._nameToLevel[log_level])
     praw_logger.addHandler(handler)
-    return logger
+    _logger = logger
+    return _logger
 
 
 def scan_text(pattern: str, text: str) -> set:
@@ -150,15 +157,34 @@ def get_submission_record(submission: praw.reddit.models.Submission) -> dict:
         u'permalink': submission.permalink,
         u'url': submission.url,
         u'shortlink': submission.shortlink,
-        u'text': submission.selftext
+        u'text': submission.selftext,
+        u'html': submission.selftext_html,
+        u'is_self': submission.is_self
     }
 
 
 def get_vars_dict(bucket_name: str, blob_name: str) -> dict:
+    """
+    :param bucket_name: The vars dict document bucket name.
+    :param blob_name: The vars dict document name.
+    :return: Variables dictionary with environment parameters.
+    """
+    global _vars_dict
+    if _vars_dict is not None:
+        return _vars_dict
     storage_client = storage.Client()
     blob = storage_client.get_bucket(bucket_name).get_blob(blob_name)
+    _vars_dict = json.loads(blob.download_as_string())
+    return _vars_dict
 
-    return json.loads(blob.download_as_string())
+
+def get_pst_from_utc(epoch: float) -> datetime:
+    """
+    Get datetime from epoch.
+    :param epoch:
+    :return: datetime in PST
+    """
+    return datetime.fromtimestamp(epoch, tz=pytz.timezone('US/Pacific'))
 
 
 def notify_sms(
@@ -168,24 +194,25 @@ def notify_sms(
         pub_sub_topic_name: str
 ):
     """
-    Trigger sms notification function with sms payload.
+    Trigger sms notification function with payload.
 
     >>> import main
     >>> from google.cloud import pubsub_v1 as pubsub
     >>> rcrd = {
-    ...     u'id': 1,
+    ...     u'id': 'id',
     ...     u'name': 'Test',
     ...     u'fullname': 't3_Test',
-    ...     u'title': 'Test of sms notification.',
+    ...     u'title': 'Six booster packs for the new set, got it last night and don’t plan on using the code.',
     ...     u'created_utc': 1579338187,
     ...     u'permalink': 'reddit/r/something',
     ...     u'url': 'http://something.com',
     ...     u'shortlink': 'http://shortlink.com',
     ...     u'text': 'xxx-xxxx-xxx',
-    ...     u'excerpts': 'xxx-xxxx-xxx'
+    ...     u'excerpts': 'K4Q-HPaz-png',
+    ...     u'is_self': True
     ... }
     >>> ps_client = pubsub.PublisherClient()
-    >>> ps_publish_topic = 'projects/tribal-artifact-263821/topics/send_notification'
+    >>> ps_publish_topic = 'projects/tribal-artifact-263821/topics/send_sms_notification'
     >>> main.notify_sms(rcrd, ['+18052845139'], ps_client, ps_publish_topic)
     0
 
@@ -195,13 +222,110 @@ def notify_sms(
     :param pub_sub_topic_name:
     :return:
     """
-    time = datetime.fromtimestamp(record['created_utc'], tz=pytz.timezone('US/Pacific'))
-    msg_text = "Title: {}\nCreated: {}\nExcerpts: {}\nLink: {}".format(
-        record['title'], time, record['excerpts'], record['shortlink'])
+    time = get_pst_from_utc(record['created_utc'])
+    msg_text = "Title: {}\nSubmitted: {}\nExcerpts:\n\t{}\nLink: {}\nIs media link: {}".format(
+        record['title'], time, "\n\t".join(record['excerpts']), record['shortlink'], not bool(record['is_self']))
     data = json.dumps({
         'sms': {
             'message': msg_text,
             'to_numbers': to_numbers
+        }
+    })
+    pub_sub_client.publish(pub_sub_topic_name, bytes(data, 'utf-8'))
+    return 0
+
+
+def notify_email(
+        record: dict,
+        to_emails: [],
+        pub_sub_client: pubsub.PublisherClient,
+        pub_sub_topic_name: str
+):
+    """
+    Trigger email notification function with payload.
+
+    >>> import main
+    >>> from google.cloud import pubsub_v1 as pubsub
+    >>> rcrd_self = {
+    ...     u'id': 'id',
+    ...     u'name': 'Test',
+    ...     u'fullname': 't3_Test',
+    ...     u'title': 'Six booster packs for the new set, got it last night and don’t plan on using the code.',
+    ...     u'created_utc': 1579338187,
+    ...     u'permalink': 'reddit/r/something',
+    ...     u'url': 'http://something.com',
+    ...     u'shortlink': 'http://shortlink.com',
+    ...     u'text': 'xxx-xxxx-xxx',
+    ...     u'excerpts': ['K4Q-HPaz-png'],
+    ...     u'html': '<!-- SC_OFF --><div class="md"><p>Is that so much to ask?</p><BR></div><!-- SC_ON -->',
+    ...     u'is_self': True
+    ... }
+    >>> ps_client = pubsub.PublisherClient()
+    >>> ps_publish_topic = os.getenv('NOTIFY_PUBSUB_TOPIC')
+    >>> main.notify_email(rcrd_self, ['jorgejch@gmail.com'], ps_client, ps_publish_topic)
+    0
+    >>> rcrd_link = {
+    ...     u'id': 'eqtfe4',
+    ...     u'name': 't3_eqtfe4',
+    ...     u'fullname': 't3_eqtfe4',
+    ...     u'title': 'A couple prerelease codes for people who aren’t able to make it to one. USA if that matters',
+    ...     u'created_utc': 1579419582,
+    ...     u'permalink': '/r/MagicArena/comments/eqtfe4/a_couple_prerelease_codes_for_people_who_arent/',
+    ...     u'url': 'https://i.redd.it/91biqetsvob41.jpg',
+    ...     u'shortlink': 'http://shortlink.com',
+    ...     u'text': '',
+    ...     u'excerpts': ['t4M-Xvt6-QCV', 'KD4-Ls8t-XMF'],
+    ...     u'html': None,
+    ...     u'is_self': False
+    ... }
+    >>> main.notify_email(rcrd_link, ['jorgejch@gmail.com'], ps_client, ps_publish_topic)
+    0
+
+    :param record:
+    :param to_emails:
+    :param pub_sub_client:
+    :param pub_sub_topic_name:
+    :return:
+    """
+    time = get_pst_from_utc(record['created_utc'])
+    message_content = \
+        """
+    <div>
+        <h3>{title}</h3>
+        <h4>Info</h4>
+            <ul>
+                <li><p><b>Full name:</b> {fullname}</p></li>
+                <li><p><b>Submitted on:</b> {time}</p></li>
+            <ul>
+        <h4>Links</h4>
+            <ul>
+                <li><a href={url}>{url_type}</a></li>
+                <li><a href={shortlink}>Short link to submission.</a></li>
+            </ul>
+        <h4>Excerpts</h4>
+            <ul>
+                {excerpts_list}
+            </ul>
+        {content_html}
+    </div>
+    """.format(
+            title=record['title'],
+            fullname=record['fullname'],
+            time=time,
+            url=record['url'],
+            url_type=record['is_self'] and "URL of submission." or "URL of linked media.",
+            shortlink=record['shortlink'],
+            excerpts_list="\n".join(list(map(lambda excerpt: '<li>' + excerpt + '</li>\n', record['excerpts']))),
+            content_html=record['is_self']
+                         and "<h3>Content</h3>\n{}".format(record['html'])
+                         or "<h3>Image</h3>\n<img src=\"{}\" style=\"width:992px;\">".format(record['url'])
+        )
+
+    data = json.dumps({
+        'email': {
+            'message': message_content,
+            'to_emails': to_emails,
+            'subject': "Pattern match found in submission '{}'.".format(record['permalink'])
         }
     })
     pub_sub_client.publish(pub_sub_topic_name, bytes(data, 'utf-8'))
@@ -215,21 +339,10 @@ def scan_subreddits_new(event, context):
 
     >>> import mock
     >>> import main
-    >>> import os
     >>> mock_context = mock.Mock()
     >>> mock_context.event_id = '617187464135194'
     >>> mock_context.timestamp = '2019-07-15T22:09:03.761Z'
     >>> data = {}
-    >>> def get_vars_dict(bucket_name, blob_name):
-    ...     return {
-    ...                 "REDDIT_CLIENT_ID": os.getenv('REDDIT_CLIENT_ID'),
-    ...                 "REDDIT_CLIENT_SECRET": os.getenv('REDDIT_CLIENT_SECRET'),
-    ...                 "REDDIT_PASSWORD": os.getenv('REDDIT_PASSWORD'),
-    ...                 "REDDIT_USERAGENT": os.getenv('REDDIT_USERAGENT'),
-    ...                 "REDDIT_USERNAME": os.getenv('REDDIT_USERNAME'),
-    ...                 "NOTIFY_PUBSUB_TOPIC": os.getenv('NOTIFY_PUBSUB_TOPIC')
-    ...            }
-    >>> main.get_vars_dict = get_vars_dict
     >>> main.scan_subreddits_new(data, mock_context)
     0
 
@@ -246,7 +359,7 @@ def scan_subreddits_new(event, context):
         to_sms_numbers = os.getenv('TO_SMS_NUMBERS').split(',')
         subreddits_names = os.getenv('SUBREDDITS').split(',')
         submission_text_regex = os.getenv('SUBMISSION_TEXT_RE')
-        logger.debug("Testing text and images for pattern {}.".format(submission_text_regex))
+        to_emails = os.getenv('TO_EMAILS').split(',')
     except Exception as e:
         logger.error("Failed to get environment variable(s) due to: {}.".format(e))
         error_reporting_client.report_exception()
@@ -274,11 +387,14 @@ def scan_subreddits_new(event, context):
         return 1
 
     try:
-        pub_sub_topic_name = vars_dict['NOTIFY_PUBSUB_TOPIC']
+        sms_pub_sub_topic_name = vars_dict['SMS_NOTIFY_PUBSUB_TOPIC']
+        email_pub_sub_topic_name = vars_dict['EMAIL_NOTIFY_PUBSUB_TOPIC']
     except KeyError as e:
         logging.error('Unable to get notify pub/sub topic, due to: {}.'.format(e))
+        error_reporting_client.report_exception()
         return 1
 
+    logger.debug("Testing text and images for pattern {}.".format(submission_text_regex))
     pub_sub_client = pubsub.PublisherClient()
     db = firestore.Client()
 
@@ -343,31 +459,33 @@ def scan_subreddits_new(event, context):
                 if len(submission_rcrd['text']) > 0:
                     excerpts_set = scan_text(submission_text_regex, submission_rcrd['text'])
                     if len(excerpts_set) > 0:
-                        submission_rcrd['excerpts'] = '\n'.join(excerpts_set)
+                        submission_rcrd['excerpts'] = list(excerpts_set)
                         logger.info(
                             'Found match in text of submission with id {} for subreddit {}. Excerpts: {}.'.format(
                                 submission_rcrd['id'], sr_name, excerpts_set
                             )
                         )
+                        notify_email(submission_rcrd, to_emails, pub_sub_client, email_pub_sub_topic_name)
+                        notify_sms(submission_rcrd, to_sms_numbers, pub_sub_client, sms_pub_sub_topic_name)
                         new_feed_text_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
-                        notify_sms(submission_rcrd, to_sms_numbers, pub_sub_client, pub_sub_topic_name)
                         continue
 
                 if re.match(r'^.+\.(jpg|png|jpeg|bmp|tiff)$', submission_rcrd['url']):
                     excerpts_set = scan_image(submission_rcrd['url'], submission_text_regex, vision, logger)
                     if len(excerpts_set) > 0:
-                        submission_rcrd['excerpts'] = '\n'.join(excerpts_set)
+                        submission_rcrd['excerpts'] = list(excerpts_set)
                         logger.info(
                             'Found match in image of submission with id {} in subreddit {}. Excerpts: {}.'.format(
                                 submission_rcrd['id'], sr_name, excerpts_set
                             )
                         )
+                        notify_email(submission_rcrd, to_emails, pub_sub_client, email_pub_sub_topic_name)
+                        notify_sms(submission_rcrd, to_sms_numbers, pub_sub_client, sms_pub_sub_topic_name)
                         new_feed_image_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
-                        notify_sms(submission_rcrd, to_sms_numbers, pub_sub_client, pub_sub_topic_name)
         except Exception as e:
-            logger.warning("Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e))
+            logger.error("Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e))
             error_reporting_client.report_exception()
-            continue  # if scan failed first scanned submission shouldn't be stored.
+            return 1  # if scan failed first scanned submission shouldn't be stored.
 
         # Save first scanned document (most recent submission) to be used as pivot on next run.
         if first_scanned_rcrd is not None:
@@ -377,5 +495,4 @@ def scan_subreddits_new(event, context):
             new_feed_first_scanned_col_ref.document(first_scanned_rcrd['id']).set(first_scanned_rcrd)
         else:
             logger.info('No new submissions found on subreddit\'s {} new feed.'.format(sr_name))
-
     return 0

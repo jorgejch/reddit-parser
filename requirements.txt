@@ -6,3 +6,4 @@ google-cloud-firestore
 google-cloud-storage
 google-cloud-vision
 google-cloud-error-reporting
+google-cloud-pubsub

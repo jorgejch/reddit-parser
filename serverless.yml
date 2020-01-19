@@ -18,6 +18,7 @@ package:
     - package-lock.json
     - .serverless/**
     - .idea/**
+    - reddit_parser_vars.json
 
 functions:
   subreddit-new-scanner:
@@ -33,10 +34,11 @@ functions:
           eventType: providers/cloud.pubsub/eventTypes/topic.publish
           resource: projects/tribal-artifact-263821/topics/trigger_subreddits_scan
     environment:
-      SUBREDDITS: MagicArena,magicTCG
+      SUBREDDITS: MagicArena,magicTCG,mtg
       LOG_LEVEL: DEBUG
       VARS_BUCKET: web-parser-vars
       VARS_BLOB: reddit_parser_vars.json
       TO_SMS_NUMBERS: '+18052845139,+18052940510'
+      TO_EMAILS: jorgejch@gmail.com,jorgejchaddad@yahoo.com
       SUBMISSION_TEXT_RE: '\b\w{3}-\w{4}-\w{3}\b'
 

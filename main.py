@@ -208,7 +208,7 @@ def notify_sms(
     ...     u'url': 'http://something.com',
     ...     u'shortlink': 'http://shortlink.com',
     ...     u'text': 'xxx-xxxx-xxx',
-    ...     u'excerpts': 'K4Q-HPaz-png',
+    ...     u'excerpts': ['K4Q-HPaz-png'],
     ...     u'is_self': True
     ... }
     >>> ps_client = pubsub.PublisherClient()
@@ -296,7 +296,7 @@ def notify_email(
             <ul>
                 <li><p><b>Full name:</b> {fullname}</p></li>
                 <li><p><b>Submitted on:</b> {time}</p></li>
-            <ul>
+            </ul>
         <h4>Links</h4>
             <ul>
                 <li><a href={url}>{url_type}</a></li>
@@ -325,7 +325,7 @@ def notify_email(
         'email': {
             'message': message_content,
             'to_emails': to_emails,
-            'subject': "Pattern match found in submission '{}'.".format(record['permalink'])
+            'subject': "[RedditParser][NEW][MTGA] Match found in submission: '{}'.".format(record['permalink'])
         }
     })
     pub_sub_client.publish(pub_sub_topic_name, bytes(data, 'utf-8'))

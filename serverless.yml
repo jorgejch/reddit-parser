@@ -38,7 +38,7 @@ functions:
       LOG_LEVEL: DEBUG
       VARS_BUCKET: web-parser-vars
       VARS_BLOB: reddit_parser_vars.json
-      TO_SMS_NUMBERS: '+18052845139,+18052940510'
-      TO_EMAILS: jorgejch@gmail.com,jorgejchaddad@yahoo.com
+      TO_SMS_NUMBERS: '+18052845139'
+      TO_EMAILS: jorgejch@gmail.com,tashirabten85@gmail.com
       SUBMISSION_TEXT_RE: '\b\w{3}-\w{4}-\w{3}\b'
 

@@ -5,7 +5,7 @@ provider:
   stage: prod
   region: us-central1
   project: tribal-artifact-263821
-  credentials: /Users/jorge.haddad/.gcloud/tribal-artifact-263821-61b1fe367269.json
+  credentials: /Users/jorge.haddad/.gcloud/serverless-framework-admin-263821.json
 
 plugins:
   - serverless-google-cloudfunctions
@@ -19,6 +19,8 @@ package:
     - .serverless/**
     - .idea/**
     - reddit_parser_vars.json
+    - utils/**
+    - std_img/**
 
 functions:
   subreddit-new-scanner:

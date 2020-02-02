@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from io import StringIO
 from datetime import datetime
 from typing import Generator
 
@@ -15,31 +16,29 @@ from google.cloud import storage
 from google.cloud import vision
 from google.cloud.firestore_v1 import DocumentReference, CollectionReference
 from google.cloud.firestore_v1 import DocumentSnapshot
-from google.cloud.logging import Client as LoggingClient
 from praw.exceptions import PRAWException
-
-from exceptions import RedditQueryPivotNotFound
+from reddit_parser_exceptions import RedditQueryPivotNotFound
 
 _logger = None
 _vars_dict = None
 
 
-def get_logger(log_level: str):
+def get_logger(log_level: str = os.getenv("LOG_LEVEL")):
     global _logger
     if _logger is not None:
         return _logger
-    client = LoggingClient()
-    handler = client.get_default_handler()
-    formatter = logging.Formatter('[{levelname:<s}]-[{name:>s}]: {message}', None, '{')
-    handler.setFormatter(formatter)
-    handler.setLevel(logging._nameToLevel[log_level])
-    logger = logging.getLogger('cloudLogger')
-    logger.addHandler(handler)
-    logger.setLevel(logging._nameToLevel[log_level])
+
+    formatter = logging.Formatter('[{levelname}]-[{name}]: {message}', None, '{')
+    handler = logging.StreamHandler()
+    _logger = logging.getLogger()
+    _logger.setLevel(logging._nameToLevel[log_level])
+    _logger.addHandler(handler)
     praw_logger = logging.getLogger('prawcore')
     praw_logger.setLevel(logging._nameToLevel[log_level])
     praw_logger.addHandler(handler)
-    _logger = logger
+    for hndlr in _logger.handlers:
+        hndlr.setFormatter(formatter)
+        hndlr.setLevel(logging._nameToLevel[log_level])
     return _logger
 
 
@@ -53,15 +52,14 @@ def scan_title(pattern: str, title: str) -> bool:
     return match is not None
 
 
-def scan_image(url: str, raw_pattern: str, vis: vision, logger: logging.Logger) -> set:
+def scan_image(url: str, raw_pattern: str, vis: vision) -> set:
     """
     >>> import main
     >>> from google.cloud import vision
     >>> import mock
-    >>> logger = mock.Mock()
     >>> url = 'https://i.redd.it/775kfxtiyma41.jpg'
     >>> pattern = '\w{3}-\w{4}-\w{3}'
-    >>> main.scan_image(url, pattern, vision, logger) ^ {
+    >>> main.scan_image(url, pattern, vision) ^ {
     ...                                          'XB8-Cytr-YWR',
     ...                                          'YQq-St4b-qzu',
     ...                                          'WOQ-bHUK-Uye',
@@ -75,42 +73,32 @@ def scan_image(url: str, raw_pattern: str, vis: vision, logger: logging.Logger) 
     :param url: Url to the image to be parsed.
     :param raw_pattern: Regex pattern to extract from parsed image's text.
     :param vis: google.cloud.vision module.
-    :param logger: Logger.
     :return: set with text excerpts obtained from the image.
     """
-    logging.debug("Beginning image scan for image with url '{}'.")
+    get_logger().debug("Beginning image scan for image with url '{}'.".format(url))
     pattern = raw_pattern.rstrip('\b').lstrip('\b')
     image = vis.types.Image()
     image.source.image_uri = url
     client = vis.ImageAnnotatorClient()
-    response_doc_text = client.document_text_detection(image=image)
     response_text = client.text_detection(image=image)
-    text_doc_annotations = response_doc_text.text_annotations
     text_annotations = response_text.text_annotations
-    text_doc_list = [text_annotation.description for text_annotation in text_doc_annotations]
     text_list = [text_annotation.description for text_annotation in text_annotations]
-    text_doc_excerpts = set(re.findall(r'{}'.format(pattern), ' '.join(text_doc_list), re.MULTILINE | re.UNICODE))
     text_excerpts = set(re.findall(r'{}'.format(pattern), ' '.join(text_list), re.MULTILINE | re.UNICODE))
 
-    if len(text_doc_excerpts) > 0:
-        logger.info(
-            "Number of excerpts in set obtained with the document text detection feature: {}."
-                .format(len(text_doc_excerpts))
-        )
-
     if len(text_excerpts) > 0:
-        logger.info(
-            "Number of excerpts in set obtained with the regular text detection feature: {}."
-                .format(len(text_excerpts))
+        reg_log_strio = StringIO()
+        reg_log_strio.write(
+            "[OCR-REG] Number of excerpts in set with the regular text detection: {}.".format(len(text_excerpts))
         )
+        reg_log_strio.write('\n\tExcerpts:\n\t\t{}'.format("\n\t\t".join(text_excerpts)))
+        get_logger().info(reg_log_strio.getvalue())
 
-    return len(text_doc_excerpts) >= len(text_excerpts) and text_doc_excerpts or text_excerpts
+    return text_excerpts
 
 
 def get_reddit_query_pivot(
         stream: Generator[DocumentSnapshot, None, None],
-        reddit_client: praw.Reddit,
-        logger: logging.Logger
+        reddit_client: praw.Reddit
 ) -> dict:
     """
     Find current run's pivot, an existing previous run's most recent submission scanned on a subreddit's new feed.
@@ -121,17 +109,18 @@ def get_reddit_query_pivot(
 
         # Check if submission is still in feed. Continue to the next if not.
         try:
-            logger.debug("Testing if submission {} is still in feed.".format(doc_dict['id']))
+            get_logger().debug("Testing if submission {} is still in feed.".format(doc_dict['id']))
             sb_selftext = sb.selftext
             if sb_selftext == '[deleted]' \
                     or sb_selftext == '[removed]' \
                     or sb.author is None \
                     or sb.removed_by_category is not None:
-                logger.info("Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
+                get_logger().info(
+                    "Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
                 continue
             return get_submission_record(sb)
         except prawcore.exceptions.NotFound:
-            logger.info("Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
+            get_logger().info("Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
             continue
 
     raise RedditQueryPivotNotFound('Reddit submissions query pivot not found.')
@@ -353,7 +342,6 @@ def scan_subreddits_new(event, context):
      ex: "google.pubsub.topic.publish". The `resource` field is the resource that emitted the event.
     """
     error_reporting_client = error_reporting.Client()
-    logger = get_logger(os.getenv('LOG_LEVEL'))
 
     try:
         to_sms_numbers = os.getenv('TO_SMS_NUMBERS').split(',')
@@ -361,14 +349,14 @@ def scan_subreddits_new(event, context):
         submission_text_regex = os.getenv('SUBMISSION_TEXT_RE')
         to_emails = os.getenv('TO_EMAILS').split(',')
     except Exception as e:
-        logger.error("Failed to get environment variable(s) due to: {}.".format(e))
+        get_logger().error("Failed to get environment variable(s) due to: {}.".format(e))
         error_reporting_client.report_exception()
         return 1
 
     try:
         vars_dict = get_vars_dict(os.getenv('VARS_BUCKET'), os.getenv('VARS_BLOB'))
     except google_cloud_exceptions.NotFound as e:
-        logger.error("Failed to obtain vars dictionary due to: {}.".format(e))
+        get_logger().error("Failed to obtain vars dictionary due to: {}.".format(e))
         error_reporting_client.report_exception()
         return 1
 
@@ -382,7 +370,7 @@ def scan_subreddits_new(event, context):
         )
         subreddits = [reddit.subreddit(sr_name) for sr_name in subreddits_names]
     except PRAWException as e:
-        logger.error("Failed to obtain Reddit PRAW client due to: {}.".format(e))
+        get_logger().error("Failed to obtain Reddit PRAW client due to: {}.".format(e))
         error_reporting_client.report_exception()
         return 1
 
@@ -394,14 +382,14 @@ def scan_subreddits_new(event, context):
         error_reporting_client.report_exception()
         return 1
 
-    logger.debug("Testing text and images for pattern {}.".format(submission_text_regex))
+    get_logger().debug("Testing text and images for pattern {}.".format(submission_text_regex))
     pub_sub_client = pubsub.PublisherClient()
     db = firestore.Client()
 
     # Scan stream 'new' of configured subreddits.
     for subreddit in subreddits:
         sr_name = subreddit.display_name
-        logger.debug("Scanning subreddit\'s {} new feed.".format(sr_name))
+        get_logger().debug("Scanning subreddit\'s {} new feed.".format(sr_name))
         # Setup Firestore collections, documents references and streams.
         try:
             subreddit_col_ref: CollectionReference = db.collection(u'reddit.{}'.format(sr_name))
@@ -421,20 +409,20 @@ def scan_subreddits_new(event, context):
                 u'image_pattern_matched'
             )
         except Exception as e:
-            logger.error("Failed to setup Firestore collections, documents and stream due to: {}".format(e))
+            get_logger().error("Failed to setup Firestore collections, documents and stream due to: {}".format(e))
             error_reporting_client.report_exception()
             return 1
 
         try:
             # Most recent submission on subreddit's new feed on last run.
-            prev_run_first_scanned_rcrd = get_reddit_query_pivot(new_feed_first_scanned_doc_stream, reddit, logger)
-            logger.info(
+            prev_run_first_scanned_rcrd = get_reddit_query_pivot(new_feed_first_scanned_doc_stream, reddit)
+            get_logger().info(
                 "Title of last run's most recent submission in subreddit {} is '{}'".format(
                     sr_name, prev_run_first_scanned_rcrd['title']
                 )
             )
         except RedditQueryPivotNotFound:
-            logger.warning(
+            get_logger().warning(
                 'No submission found from previous runs to pivot the reddit query for subreddit {}. Fetching the limit.'
                     .format(sr_name)
             )
@@ -449,7 +437,7 @@ def scan_subreddits_new(event, context):
         try:
             for submission in subreddit.new(limit=100, params={'before': prev_run_first_scanned_rcrd_fullname}):
                 submission_rcrd = get_submission_record(submission)
-                logger.info("Scanning subreddit's {} submission with title: {}.".format(
+                get_logger().info("Scanning subreddit's {} submission with title: {}.".format(
                     sr_name, submission_rcrd['title']
                 ))
 
@@ -460,7 +448,7 @@ def scan_subreddits_new(event, context):
                     excerpts_set = scan_text(submission_text_regex, submission_rcrd['text'])
                     if len(excerpts_set) > 0:
                         submission_rcrd['excerpts'] = list(excerpts_set)
-                        logger.info(
+                        get_logger().info(
                             'Found match in text of submission with id {} for subreddit {}. Excerpts: {}.'.format(
                                 submission_rcrd['id'], sr_name, excerpts_set
                             )
@@ -471,10 +459,10 @@ def scan_subreddits_new(event, context):
                         continue
 
                 if re.match(r'^.+\.(jpg|png|jpeg|bmp|tiff)$', submission_rcrd['url']):
-                    excerpts_set = scan_image(submission_rcrd['url'], submission_text_regex, vision, logger)
+                    excerpts_set = scan_image(submission_rcrd['url'], submission_text_regex, vision)
                     if len(excerpts_set) > 0:
                         submission_rcrd['excerpts'] = list(excerpts_set)
-                        logger.info(
+                        get_logger().info(
                             'Found match in image of submission with id {} in subreddit {}. Excerpts: {}.'.format(
                                 submission_rcrd['id'], sr_name, excerpts_set
                             )
@@ -483,16 +471,17 @@ def scan_subreddits_new(event, context):
                         notify_sms(submission_rcrd, to_sms_numbers, pub_sub_client, sms_pub_sub_topic_name)
                         new_feed_image_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
         except Exception as e:
-            logger.error("Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e))
+            get_logger().error("Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e))
             error_reporting_client.report_exception()
             return 1  # if scan failed first scanned submission shouldn't be stored.
 
         # Save first scanned document (most recent submission) to be used as pivot on next run.
         if first_scanned_rcrd is not None:
-            logger.info("Setting submission with title '{}' to collection {} for subreddit {}.".format(
+            get_logger().info("Setting submission with title '{}' to collection {} for subreddit {}.".format(
                 first_scanned_rcrd['title'], new_feed_first_scanned_col_ref.id, sr_name
             ))
             new_feed_first_scanned_col_ref.document(first_scanned_rcrd['id']).set(first_scanned_rcrd)
         else:
-            logger.info('No new submissions found on subreddit\'s {} new feed.'.format(sr_name))
+            get_logger().info('No new submissions found on subreddit\'s {} new feed.'.format(sr_name))
     return 0
+

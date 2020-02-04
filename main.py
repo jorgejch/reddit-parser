@@ -28,14 +28,9 @@ def get_logger(log_level: str = os.getenv("LOG_LEVEL")):
     if _logger is not None:
         return _logger
 
+    logging.basicConfig(level=logging._nameToLevel[log_level])
     formatter = logging.Formatter('[{levelname}]-[{name}]: {message}', None, '{')
-    handler = logging.StreamHandler()
     _logger = logging.getLogger()
-    _logger.setLevel(logging._nameToLevel[log_level])
-    _logger.addHandler(handler)
-    praw_logger = logging.getLogger('prawcore')
-    praw_logger.setLevel(logging._nameToLevel[log_level])
-    praw_logger.addHandler(handler)
     for hndlr in _logger.handlers:
         hndlr.setFormatter(formatter)
         hndlr.setLevel(logging._nameToLevel[log_level])

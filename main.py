@@ -23,18 +23,19 @@ _logger = None
 _vars_dict = None
 
 
-def get_logger(log_level: str = os.getenv("LOG_LEVEL")):
+def get_logger():
     global _logger
     if _logger is not None:
         return _logger
 
+    log_level: str = os.getenv("LOG_LEVEL")
     logging.basicConfig(level=logging._nameToLevel[log_level])
     formatter = logging.Formatter('[{levelname}]-[{name}]: {message}', None, '{')
     _logger = logging.getLogger()
     for hndlr in _logger.handlers:
         hndlr.setFormatter(formatter)
         hndlr.setLevel(logging._nameToLevel[log_level])
-    return _logger
+    return get_logger()
 
 
 def scan_text(pattern: str, text: str) -> set:
@@ -336,6 +337,7 @@ def scan_subreddits_new(event, context):
      field contains the publish time. The `event_type` field is the type of the event,
      ex: "google.pubsub.topic.publish". The `resource` field is the resource that emitted the event.
     """
+    get_logger().info("Starting to scan subreddits.")
     error_reporting_client = error_reporting.Client()
 
     try:
@@ -377,14 +379,14 @@ def scan_subreddits_new(event, context):
         error_reporting_client.report_exception()
         return 1
 
-    get_logger().debug("Testing text and images for pattern {}.".format(submission_text_regex))
+    get_logger().debug("Pattern in use to test images and text: {}".format(submission_text_regex))
     pub_sub_client = pubsub.PublisherClient()
     db = firestore.Client()
 
     # Scan stream 'new' of configured subreddits.
     for subreddit in subreddits:
         sr_name = subreddit.display_name
-        get_logger().debug("Scanning subreddit\'s {} new feed.".format(sr_name))
+        get_logger().info("Scanning subreddit\'s {} new feed.".format(sr_name))
         # Setup Firestore collections, documents references and streams.
         try:
             subreddit_col_ref: CollectionReference = db.collection(u'reddit.{}'.format(sr_name))
@@ -466,7 +468,9 @@ def scan_subreddits_new(event, context):
                         notify_sms(submission_rcrd, to_sms_numbers, pub_sub_client, sms_pub_sub_topic_name)
                         new_feed_image_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
         except Exception as e:
-            get_logger().error("Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e))
+            get_logger().error(
+                "Halting subreddits scan. Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e)
+            )
             error_reporting_client.report_exception()
             return 1  # if scan failed first scanned submission shouldn't be stored.
 
@@ -478,5 +482,7 @@ def scan_subreddits_new(event, context):
             new_feed_first_scanned_col_ref.document(first_scanned_rcrd['id']).set(first_scanned_rcrd)
         else:
             get_logger().info('No new submissions found on subreddit\'s {} new feed.'.format(sr_name))
+
+    get_logger().info("Finished scanning subreddits.")
     return 0
 

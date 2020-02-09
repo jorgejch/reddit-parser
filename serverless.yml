@@ -24,7 +24,7 @@ package:
 
 functions:
   subreddit-new-scanner:
-    memorySize: 256
+    memorySize: 512
     timeout: 120s
     runtime: python37
     handler: scan_subreddits_new
@@ -43,4 +43,3 @@ functions:
       TO_SMS_NUMBERS: '+18052845139'
       TO_EMAILS: jorgejch@gmail.com,tashirabten85@gmail.com
       SUBMISSION_TEXT_RE: '\b\w{3}-\w{4}-\w{3}\b'
-

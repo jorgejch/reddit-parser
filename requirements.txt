@@ -1,3 +1,5 @@
+pympler
+mock
 prawcore
 pytz
 praw

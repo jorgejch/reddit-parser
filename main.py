@@ -2,7 +2,10 @@ import json
 import logging
 import os
 import re
+
+import mock
 from io import StringIO
+from pympler import tracker, asizeof
 from datetime import datetime
 from typing import Generator
 
@@ -28,7 +31,7 @@ def get_logger():
     if _logger is not None:
         return _logger
 
-    log_level: str = os.getenv("LOG_LEVEL")
+    log_level: str = os.getenv("LOG_LEVEL") or "INFO"
     logging.basicConfig(level=logging._nameToLevel[log_level])
     formatter = logging.Formatter('[{levelname}]-[{name}]: {message}', None, '{')
     _logger = logging.getLogger()
@@ -53,16 +56,15 @@ def scan_image(url: str, raw_pattern: str, vis: vision) -> set:
     >>> import main
     >>> from google.cloud import vision
     >>> import mock
-    >>> url = 'https://i.redd.it/775kfxtiyma41.jpg'
-    >>> pattern = '\w{3}-\w{4}-\w{3}'
+    >>> url = 'https://i.redd.it/akkzmel1xpf41.jpg'
+    >>> pattern = '\b\w{3}-\w{4}-\w{3}\b'
     >>> main.scan_image(url, pattern, vision) ^ {
-    ...                                          'XB8-Cytr-YWR',
-    ...                                          'YQq-St4b-qzu',
-    ...                                          'WOQ-bHUK-Uye',
-    ...                                          'QIR-XWc7-Xwu',
-    ...                                          '5KO-ASGZ-ypm',
-    ...                                          'FuD-Xc7A-v5t',
-    ...                                          'PZX-LUty-h4v'
+    ...                                          'FZY-5YPY-W1s',
+    ...                                          'XUJ-nrfd-rbX',
+    ...                                          'Zoq-nDsL-B38',
+    ...                                          'p8q-bwDD-2gY',
+    ...                                          'cUy-4nFi-9bD',
+    ...                                          'rmZ-dZsJ-PzH',
     ...                                          }
     set()
 
@@ -79,8 +81,8 @@ def scan_image(url: str, raw_pattern: str, vis: vision) -> set:
     response_text = client.text_detection(image=image)
     text_annotations = response_text.text_annotations
     text_list = [text_annotation.description for text_annotation in text_annotations]
+    get_logger().info(f"[MEMORY_PROFILER] IMAGE_TEXT_LIST_SIZE = {asizeof.asizeof(text_list)} B")
     text_excerpts = set(re.findall(r'{}'.format(pattern), ' '.join(text_list), re.MULTILINE | re.UNICODE))
-
     if len(text_excerpts) > 0:
         reg_log_strio = StringIO()
         reg_log_strio.write(
@@ -88,6 +90,7 @@ def scan_image(url: str, raw_pattern: str, vis: vision) -> set:
         )
         reg_log_strio.write('\n\tExcerpts:\n\t\t{}'.format("\n\t\t".join(text_excerpts)))
         get_logger().info(reg_log_strio.getvalue())
+        reg_log_strio.close()
 
     return text_excerpts
 
@@ -99,6 +102,8 @@ def get_reddit_query_pivot(
     """
     Find current run's pivot, an existing previous run's most recent submission scanned on a subreddit's new feed.
     """
+
+    get_logger().info(f"[MEMORY_PROFILER] PIVOT_STREAM_SIZE = {asizeof.asizeof(stream)} B")
     for doc in stream:
         doc_dict = doc.to_dict()
         sb = reddit_client.submission(doc_dict['id'])
@@ -114,11 +119,12 @@ def get_reddit_query_pivot(
                 get_logger().info(
                     "Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
                 continue
+            stream.close()
             return get_submission_record(sb)
         except prawcore.exceptions.NotFound:
             get_logger().info("Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
             continue
-
+    stream.close()
     raise RedditQueryPivotNotFound('Reddit submissions query pivot not found.')
 
 
@@ -317,6 +323,16 @@ def notify_email(
     return 0
 
 
+def diff_pympler(summary_a, summary_b, memory_tracker):
+    diff = memory_tracker.format_diff(
+        summary_a,
+        summary_b
+    )
+
+    for line in diff:
+        get_logger().info(f"[MEMORY_PROFILER] {line}")
+
+
 def scan_subreddits_new(event, context):
     """
     Checks a subreddit for patterns in the title and text of a set of subreddits submission .
@@ -337,8 +353,12 @@ def scan_subreddits_new(event, context):
      field contains the publish time. The `event_type` field is the type of the event,
      ex: "google.pubsub.topic.publish". The `resource` field is the resource that emitted the event.
     """
-    get_logger().info("Starting to scan subreddits.")
+    tr = tracker.SummaryTracker()
+
+    # Create and get Google Cloud error reporting client.
     error_reporting_client = error_reporting.Client()
+
+    get_logger().info("Starting to scan subreddits.")
 
     try:
         to_sms_numbers = os.getenv('TO_SMS_NUMBERS').split(',')
@@ -380,7 +400,10 @@ def scan_subreddits_new(event, context):
         return 1
 
     get_logger().debug("Pattern in use to test images and text: {}".format(submission_text_regex))
+
+    # Create the Google Cloud Pub/Sub client.
     pub_sub_client = pubsub.PublisherClient()
+    # Create the Google Cloud Firestore Client.
     db = firestore.Client()
 
     # Scan stream 'new' of configured subreddits.
@@ -413,6 +436,7 @@ def scan_subreddits_new(event, context):
         try:
             # Most recent submission on subreddit's new feed on last run.
             prev_run_first_scanned_rcrd = get_reddit_query_pivot(new_feed_first_scanned_doc_stream, reddit)
+
             get_logger().info(
                 "Title of last run's most recent submission in subreddit {} is '{}'".format(
                     sr_name, prev_run_first_scanned_rcrd['title']
@@ -481,7 +505,12 @@ def scan_subreddits_new(event, context):
             ))
             new_feed_first_scanned_col_ref.document(first_scanned_rcrd['id']).set(first_scanned_rcrd)
         else:
-            get_logger().info('No new submissions found on subreddit\'s {} new feed.'.format(sr_name))
+            get_logger().info('No new submissions found on subreddit\'s {} new feed. Setting pivot as last submission.'
+                              .format(sr_name))
+            new_feed_first_scanned_col_ref.document(prev_run_first_scanned_rcrd['id']).set(prev_run_first_scanned_rcrd)
+
+    for line in tr.format_diff():
+        get_logger().info(f"[MEMORY PROFILER] {line}")
 
     get_logger().info("Finished scanning subreddits.")
     return 0

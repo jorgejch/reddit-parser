@@ -2,12 +2,11 @@ import json
 import logging
 import os
 import re
-
-import mock
-from io import StringIO
 from datetime import datetime
+from io import StringIO
 from typing import Generator
 
+import mock
 import praw
 import prawcore
 import pytz
@@ -18,6 +17,7 @@ from google.cloud import vision
 from google.cloud.firestore_v1 import DocumentReference, CollectionReference
 from google.cloud.firestore_v1 import DocumentSnapshot
 from praw.exceptions import PRAWException
+
 from reddit_parser_exceptions import RedditQueryPivotNotFound
 
 _LOGGER = None

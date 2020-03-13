@@ -30,21 +30,20 @@ _DB_CLIENT = None
 
 def _get_logger() -> logging.Logger:
     global _LOGGER
-    if _LOGGER is not None:
+    if _LOGGER:
         return _LOGGER
     log_level: str = os.getenv("LOG_LEVEL") or "INFO"
     logging.basicConfig(level=logging._nameToLevel[log_level])
-    formatter = logging.Formatter('[{levelname}]-[{name}]: {message}', None, '{')
     _LOGGER = logging.getLogger()
-    for hdlr in _LOGGER.handlers:
-        hdlr.setFormatter(formatter)
-        hdlr.setLevel(logging._nameToLevel[log_level])
     return _LOGGER
+
+
+_get_logger().info('Loading module.')
 
 
 def _get_error_reporting_client() -> error_reporting.Client:
     global _ERROR_REPORTING_CLIENT
-    if _ERROR_REPORTING_CLIENT is not None:
+    if _ERROR_REPORTING_CLIENT:
         return _ERROR_REPORTING_CLIENT
     _ERROR_REPORTING_CLIENT = error_reporting.Client()
     return _ERROR_REPORTING_CLIENT
@@ -52,9 +51,9 @@ def _get_error_reporting_client() -> error_reporting.Client:
 
 def _get_reddit_client() -> praw.Reddit:
     global _REDDIT_CLIENT
-    if _REDDIT_CLIENT is not None:
+    if _REDDIT_CLIENT:
         return _REDDIT_CLIENT
-    vars_dict = _get_vars_dict(os.getenv('VARS_BUCKET'), os.getenv('VARS_BLOB'))
+    vars_dict = _get_vars_dict()
     _REDDIT_CLIENT = praw.Reddit(
         client_id=vars_dict['REDDIT_CLIENT_ID'],
         client_secret=vars_dict['REDDIT_CLIENT_SECRET'],
@@ -67,7 +66,7 @@ def _get_reddit_client() -> praw.Reddit:
 
 def _get_db_client() -> firestore.Client:
     global _DB_CLIENT
-    if _DB_CLIENT is not None:
+    if _DB_CLIENT:
         return _DB_CLIENT
     _DB_CLIENT = firestore.Client()
     return _DB_CLIENT
@@ -75,7 +74,7 @@ def _get_db_client() -> firestore.Client:
 
 def _get_pub_sub_client() -> pubsub.PublisherClient:
     global _PUB_SUB_CLIENT
-    if _PUB_SUB_CLIENT is not None:
+    if _PUB_SUB_CLIENT:
         return _PUB_SUB_CLIENT
     _PUB_SUB_CLIENT = pubsub.PublisherClient()
     return _PUB_SUB_CLIENT
@@ -83,20 +82,20 @@ def _get_pub_sub_client() -> pubsub.PublisherClient:
 
 def _get_image_annotator_client() -> vision.ImageAnnotatorClient:
     global _IMAGE_ANNOTATOR_CLIENT
-    if _IMAGE_ANNOTATOR_CLIENT is not None:
+    _get_logger().info(f'_IMAGE_ANNOTATOR_CLIENT value: {_IMAGE_ANNOTATOR_CLIENT}')
+    if _IMAGE_ANNOTATOR_CLIENT:
         return _IMAGE_ANNOTATOR_CLIENT
+    _get_logger().info("Instantiated ImageAnnotatorClient.")
     _IMAGE_ANNOTATOR_CLIENT = vision.ImageAnnotatorClient()
     return _IMAGE_ANNOTATOR_CLIENT
 
 
-def _get_vars_dict(bucket_name: str, blob_name: str) -> dict:
+def _get_vars_dict() -> dict:
     """
-    :param bucket_name: The vars dict document bucket name.
-    :param blob_name: The vars dict document name.
-    :return: Variables dictionary with environment parameters.
+    Get sensitive data dict.
     """
     storage_client = storage.Client()
-    blob = storage_client.get_bucket(bucket_name).get_blob(blob_name)
+    blob = storage_client.get_bucket(os.getenv('VARS_BUCKET')).get_blob(os.getenv('VARS_BLOB'))
     return json.loads(blob.download_as_string())
 
 
@@ -127,29 +126,32 @@ def _get_pst_from_utc(epoch: float) -> datetime:
 
 def _get_reddit_query_pivot(
         stream: Generator[DocumentSnapshot, None, None],
-        reddit_client: praw.Reddit
+        first_scanned_col_ref: CollectionReference
 ) -> dict:
     """
     Find current run's pivot, an existing previous run's most recent submission scanned on a subreddit's new feed.
     """
     for doc in stream:
         doc_dict = doc.to_dict()
-        sb = reddit_client.submission(doc_dict['id'])
+        sb = _get_reddit_client().submission(doc_dict['id'])
 
         # Check if submission is still in feed. Continue to the next if not.
         try:
-            _get_logger().debug("Testing if submission {} is still in feed.".format(doc_dict['id']))
+            _get_logger().debug(f"Testing if submission {doc_dict['id']} is still in feed.")
             sb_selftext = sb.selftext
             if sb_selftext == '[deleted]' \
                     or sb_selftext == '[removed]' \
                     or sb.author is None \
                     or sb.removed_by_category is not None:
                 _get_logger().info(
-                    "Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
+                    f"Submission {doc_dict['id']} has left feed, testing next submission for pivot."
+                )
+                first_scanned_col_ref.document(doc.id).delete()  # delete from database so it's not tested again.
                 continue
             return _get_submission_record(sb)
         except prawcore.exceptions.NotFound:
-            _get_logger().info("Submission {} has left feed, testing next submission for pivot.".format(doc_dict['id']))
+            _get_logger().info(f"Submission {doc_dict['id']} has left feed, testing next submission for pivot.")
+            first_scanned_col_ref.document(doc.id).delete()
             continue
     raise RedditQueryPivotNotFound('Reddit submissions query pivot not found.')
 
@@ -179,7 +181,7 @@ def _scan_image(url: str, raw_pattern: str) -> set:
     :param raw_pattern: Regex pattern to extract from parsed image's text.
     :return: set with text excerpts obtained from the image.
     """
-    _get_logger().debug("Beginning image scan for image with url '{}'.".format(url))
+    _get_logger().info("Beginning image scan for image with url '{}'.".format(url))
     pattern = raw_pattern.rstrip('\b').lstrip('\b')
     image = vision.types.Image()
     image.source.image_uri = url
@@ -360,15 +362,14 @@ def scan_subreddits_new(event, context) -> int:
         submission_text_regex = os.getenv('SUBMISSION_TEXT_RE')
         to_emails = os.getenv('TO_EMAILS').split(',')
     except Exception as e:
-        _get_logger().error("Failed to get environment variable(s) due to: {}.".format(e))
+        _get_logger().error("Failed to get environment variable(s) due to: {}.".format(e), exc_info=True)
         _get_error_reporting_client().report_exception()
         return 1
 
     try:
-        reddit = _get_reddit_client()
-        subreddits = [reddit.subreddit(sr_name) for sr_name in subreddits_names]
+        subreddits = [_get_reddit_client().subreddit(sr_name) for sr_name in subreddits_names]
     except PRAWException as e:
-        _get_logger().error("Failed to obtain Reddit PRAW client due to: {}.".format(e))
+        _get_logger().error("Failed to obtain Reddit PRAW client due to: {}.".format(e), exc_info=True)
         _get_error_reporting_client().report_exception()
         return 1
 
@@ -397,13 +398,18 @@ def scan_subreddits_new(event, context) -> int:
                 u'image_pattern_matched'
             )
         except Exception as e:
-            _get_logger().error("Failed to setup Firestore collections, documents and stream due to: {}".format(e))
+            _get_logger().error(
+                "Failed to setup Firestore collections, documents and stream due to: {}".format(e), exc_info=True
+            )
             _get_error_reporting_client().report_exception()
             return 1
 
         try:
             # Most recent submission on subreddit's new feed on last run.
-            prev_run_first_scanned_rcrd = _get_reddit_query_pivot(new_feed_first_scanned_doc_stream, reddit)
+            prev_run_first_scanned_rcrd = _get_reddit_query_pivot(
+                new_feed_first_scanned_doc_stream,
+                new_feed_first_scanned_col_ref
+            )
             new_feed_first_scanned_doc_stream.close()
 
             _get_logger().info(
@@ -444,7 +450,7 @@ def scan_subreddits_new(event, context) -> int:
                             )
                         )
                         _notify_email(submission_rcrd, to_emails)
-                        _notify_sms(submission_rcrd, to_sms_numbers)
+                        # _notify_sms(submission_rcrd, to_sms_numbers)
                         new_feed_text_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
                         continue
 
@@ -458,11 +464,12 @@ def scan_subreddits_new(event, context) -> int:
                             )
                         )
                         _notify_email(submission_rcrd, to_emails)
-                        _notify_sms(submission_rcrd, to_sms_numbers)
+                        # _notify_sms(submission_rcrd, to_sms_numbers)
                         new_feed_image_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
         except Exception as e:
             _get_logger().error(
-                "Halting subreddits scan. Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e)
+                "Halting subreddits scan. Failed to scan subreddit {}'s new feed due to: {}".format(sr_name, e),
+                exc_info=True
             )
             _get_error_reporting_client().report_exception()
             return 1  # if scan failed first scanned submission shouldn't be stored.
@@ -482,7 +489,7 @@ def scan_subreddits_new(event, context) -> int:
                 new_feed_first_scanned_col_ref.document(prev_run_first_scanned_rcrd['id']) \
                     .set(prev_run_first_scanned_rcrd)
         except Exception as e:
-            _get_logger().warning(f"Unable to persist final state due to: {e}")
+            _get_logger().warning(f"Unable to persist final state due to: {e}", exc_info=True)
             _get_error_reporting_client().report_exception()
 
     _get_logger().info("Finished scanning subreddits.")

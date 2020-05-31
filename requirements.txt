@@ -5,6 +5,6 @@ pytz
 praw
 google-cloud-firestore
 google-cloud-error-reporting
-google-cloud-pubsub
 google-cloud-storage
+google-cloud-pubsub
 google-cloud-vision

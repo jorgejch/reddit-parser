@@ -8,6 +8,6 @@
   },
   "author": "Jorge Haddad",
   "devDependencies": {
-    "serverless-google-cloudfunctions": "file:../../serverless-google-cloudfunctions"
+    "serverless-google-cloudfunctions-amazing": "^2.3.9"
   }
 }

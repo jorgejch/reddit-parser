@@ -200,6 +200,15 @@ def _scan_image(url: str, raw_pattern: str) -> set:
     return text_excerpts
 
 
+def _save_image_to_mega(url):
+    pub_sub_topic_name = os.getenv('MEGA_STORAGE_PUBSUB_TOPIC')
+    data = json.dumps({
+        "url": url,
+        "folder": os.getenv('MEGA_IMAGE_FOLDER')
+    })
+    _get_pub_sub_client().publish(pub_sub_topic_name, bytes(data, 'utf-8'))
+
+
 def _notify_sms(
         record: dict,
         to_numbers: []
@@ -465,6 +474,8 @@ def scan_subreddits_new(event, context) -> int:
                         )
                         _notify_email(submission_rcrd, to_emails)
                         # _notify_sms(submission_rcrd, to_sms_numbers)
+                        # save image to cloud storage bucket
+                        _save_image_to_mega(submission_rcrd['url'])
                         new_feed_image_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
         except Exception as e:
             _get_logger().error(

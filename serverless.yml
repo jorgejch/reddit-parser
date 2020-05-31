@@ -5,10 +5,10 @@ provider:
   stage: prod
   region: us-central1
   project: tribal-artifact-263821
-  credentials: /Users/jorge.haddad/.gcloud/serverless-framework-admin-263821.json
+  credentials: /Users/jorgejch/.gcloud/web-parser-service-admin-tribal-artifact-263821.json
 
 plugins:
-  - serverless-google-cloudfunctions
+  - serverless-google-cloudfunctions-amazing
 
 package:
   exclude:
@@ -43,5 +43,7 @@ functions:
       TO_SMS_NUMBERS: '+18052845139'
       TO_EMAILS: jorgejch@gmail.com,tashirabten85@gmail.com
       SUBMISSION_TEXT_RE: '\b\w{3}-\w{4}-\w{3}\b'
+      MEGA_IMAGE_FOLDER: mtga-promo-cards
       SMS_NOTIFY_PUBSUB_TOPIC:  'projects/tribal-artifact-263821/topics/send_sms_notification'
       EMAIL_NOTIFY_PUBSUB_TOPIC: 'projects/tribal-artifact-263821/topics/send_email_notification'
+      MEGA_STORAGE_PUBSUB_TOPIC: 'projects/tribal-artifact-263821/topics/save-to-mega'

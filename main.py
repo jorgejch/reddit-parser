@@ -201,12 +201,23 @@ def _scan_image(url: str, raw_pattern: str) -> set:
 
 
 def _save_image_to_mega(url):
+    """
+    Sends a file url to be saved on the Mega.nz service.
+
+    >>> from main import _save_image_to_mega
+    >>> url = 'https://i.redd.it/akkzmel1xpf41.jpg'
+    >>> _save_image_to_mega(url)
+    0
+    """
     pub_sub_topic_name = os.getenv('MEGA_STORAGE_PUBSUB_TOPIC')
-    data = json.dumps({
+    data = bytes(json.dumps({
         "url": url,
         "folder": os.getenv('MEGA_IMAGE_FOLDER')
-    })
-    _get_pub_sub_client().publish(pub_sub_topic_name, bytes(data, 'utf-8'))
+    }), 'utf-8')
+    _get_logger().info(f"Data string to send: {data}")
+    _get_pub_sub_client().publish(pub_sub_topic_name, data)
+
+    return 0
 
 
 def _notify_sms(
@@ -474,8 +485,7 @@ def scan_subreddits_new(event, context) -> int:
                         )
                         _notify_email(submission_rcrd, to_emails)
                         # _notify_sms(submission_rcrd, to_sms_numbers)
-                        # save image to cloud storage bucket
-                        _save_image_to_mega(submission_rcrd['url'])
+                        _save_image_to_mega(submission_rcrd['url'])  # save image to the Mega.nz  service.
                         new_feed_image_pattern_matched_col_ref.document(submission_rcrd['id']).set(submission_rcrd)
         except Exception as e:
             _get_logger().error(
